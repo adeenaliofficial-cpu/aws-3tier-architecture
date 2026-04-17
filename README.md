@@ -1,23 +1,23 @@
-# AWS 3‑Tier Architecture Lab – Project Documentation
+# AWS 3-Tier Architecture Lab – Project Documentation
 
-This repository contains my first AWS infrastructure project: a secure 3‑tier environment built from scratch.  It records every step I took, why I made certain design decisions, and includes placeholders for the screenshots I captured along the way.  By documenting the rationale behind the architecture and the lessons learned, I hope to show that I’m not just following instructions—I understand the *why* behind each component and have a security‑first mindset.
+This repository contains my first AWS infrastructure project: a secure 3-tier environment built from scratch on AWS. It documents what I built, why I made certain design decisions, and how I validated the architecture end to end. My goal was not just to complete a lab, but to understand the reasoning behind each component and present the work with a security-first mindset.
 
 ## Project Summary
 
-The goal of this lab was to design and deploy a **3‑tier architecture** on AWS.  The environment consists of:
+The goal of this lab was to design and deploy a **3-tier architecture** on AWS. The environment consists of:
 
-- A **custom VPC** with clearly defined public and private subnets.
-- Separate **security groups** for the bastion host, web server, application server, and database.
-- A **bastion host** in the public subnet for controlled administrative access.
-- A **web server** exposed to the internet via the public subnet.
-- An **application server** hosted privately with no public IP.
-- A private **RDS MariaDB** instance in its own subnet group.
+- A **custom VPC** with clearly defined public and private subnets
+- Separate **security groups** for the bastion host, web server, application server, and database
+- A **bastion host** in the public subnet for controlled administrative access
+- A **web server** exposed to the internet through the public subnet
+- An **application server** hosted privately with no public IP
+- A private **RDS MariaDB** instance inside dedicated database subnets
 
-Throughout the build I focused on **network segmentation**, **least privilege**, and **defence in depth** so that each tier is isolated and only receives the minimum necessary traffic.  The remainder of this document explains how to reproduce this environment and why each decision was made.
+Throughout the build, I focused on **network segmentation**, **least privilege**, and **defence in depth** so that each tier is isolated and only receives the minimum traffic it requires.
 
 ## Architecture Diagram
 
-The high‑level design is illustrated below.  It shows the VPC, subnets, gateways, route tables, EC2 instances, and RDS instance.  A bastion host provides SSH access to the private tier, while a NAT Gateway enables outbound updates from private instances.
+The high-level design is illustrated below. It shows the VPC, public and private tiers, gateways, compute instances, and the database layer. The traffic flow reflects a security-conscious design in which public access is limited to intended entry points while internal communication stays controlled.
 
 ![Architecture Diagram](images/architecture-diagram.png)
 
@@ -25,92 +25,125 @@ The high‑level design is illustrated below.  It shows the VPC, subnets, gatewa
 
 ### 1. Networking Setup
 
-1. **Create a VPC** – I used the CIDR block `192.168.0.0/16` to allow enough address space for multiple subnets.  A custom VPC gives full control over IP addressing and routing.
-2. **Create subnets** – Four subnets were created:
-   - **Public subnet:** `192.168.1.0/24` for the bastion and web server.
-   - **Private subnet 1:** `192.168.2.0/24` for the application server.
-   - **Private subnet 2:** `192.168.3.0/24` reserved for future workloads or redundancy.
-   - **Private subnet 3:** `192.168.4.0/24` dedicated to the database tier.
+1. **Create a VPC**  
+   I used the CIDR block `192.168.0.0/16` to provide enough address space for multiple subnets. A custom VPC gives full control over addressing, routing, and segmentation.
 
-   Keeping the app and database tiers in private subnets prevents direct internet exposure and enforces network segmentation.
-3. **Allocate an Elastic IP** – Required for the NAT Gateway so private instances can reach the internet for updates without being reachable from outside.
-4. **Create an Internet Gateway** – Enables public subnet resources to send/receive traffic from the internet.
-5. **Create a NAT Gateway** – Placed in the public subnet and associated with the Elastic IP.  This allows private subnet instances to initiate outbound traffic while blocking inbound connections.
-6. **Route tables** – Two route tables were configured:
-   - **Public route table** with a default route (`0.0.0.0/0`) pointing to the Internet Gateway and associated with the public subnet.
-   - **Private route table** with a default route pointing to the NAT Gateway and associated with all private subnets.  This enforces separation even if security group rules are misconfigured.
-7. **Security groups** – Four groups were created:
-   - **Bastion SG:** Allows SSH from my IP and optional HTTP/HTTPS from anywhere.
-   - **Web SG:** Allows HTTP/HTTPS from anywhere; restricted inbound access otherwise.
-   - **App SG:** Allows SSH from the bastion SG, ICMP from the web SG, and later HTTP/HTTPS and MySQL from trusted sources.
-   - **DB SG:** Allows MySQL/Aurora from the app SG and bastion SG only.  This prevents the web tier from hitting the database directly.
+2. **Create subnets**  
+   Four subnets were created:
+   - **Public subnet:** `192.168.1.0/24` for the bastion and web server
+   - **Private subnet 1:** `192.168.2.0/24` for the application server
+   - **Private subnet 2:** `192.168.3.0/24` for the database tier
+   - **Private subnet 3:** `192.168.4.0/24` for the database tier
 
-   Separating security groups enforces least privilege—if one tier is compromised it cannot directly reach the others.
+   Keeping the application and database tiers private reduces direct internet exposure and improves isolation.
+
+3. **Allocate an Elastic IP**  
+   This was required for the NAT Gateway so private instances could access the internet for updates without becoming publicly reachable.
+
+4. **Create an Internet Gateway**  
+   This enables internet connectivity for resources in the public subnet.
+
+5. **Create a NAT Gateway**  
+   The NAT Gateway was placed in the public subnet and associated with the Elastic IP. It allows private resources to initiate outbound traffic while blocking direct inbound internet traffic.
+
+6. **Configure route tables**
+   - **Public route table:** default route (`0.0.0.0/0`) to the Internet Gateway
+   - **Private route table:** default route (`0.0.0.0/0`) to the NAT Gateway
+
+   This separation ensures that private subnets do not route directly to the internet.
+
+7. **Create security groups**
+   - **Bastion SG:** allows SSH from my IP and limited public web access used in the lab
+   - **Web SG:** allows public web traffic and controlled internal communication
+   - **App SG:** allows SSH from the bastion host, ICMP from the web tier, and only the application/database traffic required for validation
+   - **DB SG:** allows MySQL/Aurora only from the application tier and bastion host
+
+   Using separate security groups per tier supports least privilege and reduces blast radius.
 
 ### 2. Launch Compute Instances
 
-1. **Bastion Host** – An Amazon Linux 2 instance in the public subnet with a public IP and the Bastion SG attached.  The bastion host is the single entry point for administrators and uses SSH keys for secure access.
-2. **Web Server** – Another Amazon Linux 2 instance in the public subnet.  The user data script installs Apache, PHP, and the MariaDB client.  It runs without a graphical interface and starts the web service automatically on boot.
-3. **Application Server** – Launched in **Private Subnet 1** with no public IP.  A user data script installs and starts the MariaDB server (to practise local DB setup).  Access is only via the bastion host or the web server through the security groups.
+1. **Bastion Host**  
+   An **Amazon Linux 2023** instance launched in the public subnet with a public IP and the Bastion SG attached. This acts as the controlled administrative entry point to the environment.
+
+2. **Web Server**  
+   Another **Amazon Linux 2023** instance launched in the public subnet. It was configured to serve the public-facing tier and represent the internet-accessible application entry point.
+
+3. **Application Server**  
+   An **Amazon Linux 2023** instance launched in **Private Subnet 1** with no public IP. It is reachable only through intended internal paths and communicates with the database privately.
 
 ### 3. Provision the Database
 
-1. **DB Subnet Group** – Created in Amazon RDS to span the two private subnets reserved for the database.  This allows for multi‑AZ failover in the future.
-2. **RDS Instance** – A MariaDB instance deployed in private subnets with **public access disabled** and the **DB SG attached**.  I chose the free tier for cost reasons during the lab.  In production, you would enable encryption and automated backups.
+1. **DB Subnet Group**  
+   I created a DB subnet group spanning the private subnets reserved for the database tier. This supports isolation and prepares the design for better resilience.
 
-### 4. Validate Connectivity
+2. **RDS Instance**  
+   A **MariaDB RDS instance** was deployed in private subnets with internet access disabled and the DB security group attached. For lab speed and simplicity, I used the free tier configuration.
 
-1. SSH into the bastion host using the provided key pair.
-2. Transfer the private key to the bastion and set its permissions (`chmod 400`).
-3. SSH from the bastion into the application server using its private IP.  This confirms that routing and the security groups allow internal access.
-4. Ping the web server from the app server to test east–west connectivity.
-5. Connect to the RDS endpoint from the application server using the MySQL client and run `SHOW DATABASES;` to verify access.
+## Validation & Connectivity Testing
 
-These tests verify that each tier can communicate only with its intended peers and that the database is not exposed directly to the internet.
+I validated the architecture step by step:
+
+1. SSH into the **Bastion Host**
+2. Transfer the private key to the bastion and secure its permissions
+3. SSH from the bastion into the **Application Server**
+4. Ping the **Web Server** from the app tier to verify east-west communication
+5. Connect from the app tier to the **RDS endpoint** using the MariaDB client
+6. Run `SHOW DATABASES;` successfully
+
+These checks confirm that each tier can communicate only across intended paths and that the database is not directly exposed to the public internet. I also validated that private resources were reachable only through controlled internal paths rather than direct external access.
 
 ## Screenshots
 
-As you perform the lab, capture evidence of each major step and save the images in the `images/` folder with the following filenames.  Once the screenshots are in place, they will render automatically in the README.
+The following screenshots document each major stage of the project.
 
 | Step | Filename | Description |
-|-----|---------|-------------|
-| **VPC / Subnets** | `images/01-vpc-subnets.png` | Shows the VPC and subnets you created in the AWS console. |
-| **Route Tables / IGW / NAT Gateway** | `images/02-routing.png` | Captures your route tables and gateways after configuration. |
-| **Security Groups** | `images/03-security-groups.png` | Lists inbound rules for each security group. |
-| **EC2 Instances** | `images/04-ec2-instances.png` | Displays the bastion, web, and app instances running. |
-| **DB Subnet Group / RDS** | `images/05-rds.png` | Shows the DB subnet group and the RDS instance settings. |
-| **Bastion SSH / App Server Access** | `images/06-ssh-test.png` | Proof that you can SSH from the bastion to the app server. |
-| **Database Connectivity Test** | `images/07-db-test.png` | Proof that you can connect to the database from the app tier. |
+|------|----------|-------------|
+| **VPC / Subnets** | `images/01-vpc-subnets.png` | VPC and subnet layout in the AWS console |
+| **Route Tables / IGW / NAT Gateway** | `images/02-routing.png` | Routing configuration and gateway setup |
+| **Security Groups** | `images/03-security-groups.png` | Final inbound rules for each security group |
+| **EC2 Instances** | `images/04-ec2-instances.png` | Bastion, web, and app instances in running state |
+| **DB Subnet Group / RDS** | `images/05-rds.png` | Database subnet group and RDS configuration |
+| **Bastion SSH / App Server Access** | `images/06-ssh-test.png` | SSH validation from bastion to app server |
+| **Database Connectivity Test** | `images/07-db-test.png` | App-to-database connectivity and `SHOW DATABASES;` output |
 
-Add any additional screenshots that you find useful (e.g., NAT Gateway creation, subnet association details).  Place them in the `images/` folder and update the table above if you change the file names.
+## Key Decisions & Trade-Offs
 
-## Key Decisions & Trade‑Offs
+- **Separate security groups per tier** rather than one shared group, to enforce least privilege and reduce the impact of a compromise
+- **Private subnets for the app and database tiers** to minimize attack surface
+- **NAT Gateway for outbound-only internet access** from private resources
+- **Bastion host for administrative access** instead of exposing SSH on private resources
+- **Route table separation** to keep the public and private network paths distinct
 
-- **Separate security groups per tier** rather than a single group, to enforce least privilege and reduce blast radius.
-- **Private subnets for the app and database tiers** to prevent direct internet exposure.
-- **NAT Gateway** instead of direct internet connectivity for private instances.  This increases cost slightly but improves security.
-- **Bastion host** for administrative access instead of opening SSH on every instance.  A VPN could further improve security in a real‑world deployment.
-
-These choices align with AWS best practices for defence in depth and network segmentation.
+These choices reflect AWS security best practices and a defence-in-depth approach.
 
 ## What I Learned
 
-This project helped me understand how public and private networking work together inside a VPC, how Internet and NAT Gateways serve different purposes, how security groups control east–west and north–south traffic, and how to use a bastion host for controlled access.  I also practised launching RDS in private subnets and validated connectivity across tiers.
+This project helped me understand:
+
+- how a 3-tier architecture is structured in AWS
+- how public and private networking work together inside a VPC
+- how Internet Gateway and NAT Gateway serve different roles
+- how security groups control both north-south and east-west traffic
+- how a bastion host can act as a controlled jump point
+- how private application and database tiers can be validated without public exposure
 
 ## Future Improvements & Roadmap
 
-To build on this lab, I plan to:
+To build on this project, I would next:
 
-1. **Rebuild the environment with Terraform or CloudFormation** to practice Infrastructure as Code.
-2. **Add monitoring and alarms** with CloudWatch and SNS to detect anomalies.
-3. **Implement stronger secret management**, using AWS Secrets Manager instead of hard‑coding DB credentials in user data.
-4. **Extend the architecture** with a load balancer and auto‑scaling group to make the web tier highly available.
-
+1. **Rebuild the architecture with Terraform or CloudFormation** to demonstrate Infrastructure as Code
+2. **Add monitoring and alerting** with CloudWatch and SNS
+3. **Improve secret handling** using AWS Secrets Manager instead of relying on manual credential handling
+4. **Add a load balancer and auto scaling** for a more production-like web tier
+5. **Replace bastion-based administration with AWS Systems Manager Session Manager** in a more mature version of the design
+6. **Strengthen the database setup** with encryption, automated backups, and tighter operational controls
 
 ## About Me
 
-I am an **AWS re/Start graduate** and a final‑year **Cybersecurity student** at FAST‑NUCES, Karachi.  I hold the **AWS Certified Cloud Practitioner** and **(ISC)² Certified in Cybersecurity (CC)** credentials.  Through internships at the **State Bank of Pakistan** and **MRBF Consulting**, I have gained experience in network segmentation, risk management, and compliance.  My goal is to become a cloud security engineer who builds compliant, resilient infrastructure with a security‑first mindset.  You can learn more about my experience and projects on [my LinkedIn](https://www.linkedin.com/in/adeen-ali/).
+I am an **AWS re/Start graduate** and a final-year **Cybersecurity student** at FAST-NUCES, Karachi. I hold the **AWS Certified Cloud Practitioner** and **(ISC)² Certified in Cybersecurity (CC)** credentials. Through internships at the **State Bank of Pakistan** and **MRBF Consulting**, I have gained experience in network segmentation, risk management, and compliance. My goal is to become a cloud security engineer who builds compliant, resilient infrastructure with a security-first mindset.
+
+You can learn more about my background on [my LinkedIn](https://www.linkedin.com/in/adeen-ali/).
 
 ---
 
-**Note:** If you’re cloning this repo to follow along, rename the screenshot files to match the table above or update the Markdown paths accordingly.  All instructions are written using the Asia/Karachi timezone (UTC+05:00) and date format as of 4 April 2026.
+**Note:** This project is documented as a portfolio piece to demonstrate both implementation and reasoning. The focus is not just on building the lab, but on explaining the architecture clearly and validating it in a way that reflects practical cloud security thinking.
