@@ -1,4 +1,4 @@
-# AWS 3-Tier Architecture Lab – Project Documentation
+# AWS 3-Tier Architecture – Project Documentation
 
 This repository contains my first AWS infrastructure project: a secure 3-tier environment built from scratch on AWS. It documents what I built, why I made certain design decisions, and how I validated the architecture end to end. My goal was not just to complete a lab, but to understand the reasoning behind each component and present the work with a security-first mindset.
 
